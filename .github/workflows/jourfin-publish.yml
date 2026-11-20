@@ -51,8 +51,11 @@ jobs:
           git -C ffmpeg-src show "$commit:COPYING.LGPLv2.1" > dist/COPYING.LGPLv2.1.txt
           scripts="$(git rev-parse HEAD)"
           git archive --prefix=build-scripts/ -o "dist/build-scripts-${scripts::12}.tar.gz" HEAD
-          ./download.sh || true
-          if [ -d .cache/downloads ]; then tar -czf "dist/dependency-sources-${scripts::12}.tar.gz" -C .cache downloads; fi
+          # The dependency sources as these scripts download them, in upstream's public base image (which these
+          # scripts also build upstream). Without them the GPL builds would lack their corresponding source.
+          GITHUB_REPOSITORY=ffmpeg-builds/ffmpeg-builds ./download.sh
+          test -n "$(ls -A .cache/downloads)"
+          tar -czf "dist/dependency-sources-${scripts::12}.tar.gz" -C .cache downloads
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
           {
             echo "NAME=${version}-jourfin.${{ inputs.revision }}"

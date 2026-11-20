@@ -44,7 +44,12 @@ jobs:
           version="$(./ffbuild/ffmpeg/ffbuild/version.sh ffbuild/ffmpeg 2>/dev/null || true)"
           [ -n "$version" ] || version="$(basename artifacts/* | sed -E 's/^ffmpeg-(.*)-${{ matrix.target }}-gpl.*/\1/')"
           echo "$version" > out/VERSION-${{ matrix.target }}
-          for f in artifacts/*; do mv "$f" "out/ffmpeg-${{ matrix.target }}-gpl.${f##*.}"; done
+          for f in artifacts/*; do
+            case "$f" in
+              *.tar.xz) mv "$f" "out/ffmpeg-${{ matrix.target }}-gpl.tar.xz" ;;
+              *.zip) mv "$f" "out/ffmpeg-${{ matrix.target }}-gpl.zip" ;;
+            esac
+          done
           {
             echo "target: ${{ matrix.target }}"
             echo "ffmpeg: ${{ inputs.tag }} at $(git ls-remote https://github.com/FFmpeg/FFmpeg.git 'refs/heads/${{ inputs.tag }}' 'refs/tags/${{ inputs.tag }}^{}' | head -1 | cut -f1) ($version)"
