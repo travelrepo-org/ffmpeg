@@ -55,7 +55,11 @@ jobs:
           # scripts also build upstream). Without them the GPL builds would lack their corresponding source.
           GITHUB_REPOSITORY=ffmpeg-builds/ffmpeg-builds ./download.sh
           test -n "$(ls -A .cache/downloads)"
-          tar -czf "dist/dependency-sources-${scripts::12}.tar.gz" -C .cache downloads
+          # GitHub takes assets up to 2 GiB; the sources are larger, so they come in parts joined with
+          # `cat dependency-sources-*.tar.gz.part-* > dependency-sources.tar.gz`.
+          tar -czf "$RUNNER_TEMP/dependency-sources-${scripts::12}.tar.gz" -C .cache downloads
+          split -b 1900M -d -a 2 "$RUNNER_TEMP/dependency-sources-${scripts::12}.tar.gz" "dist/dependency-sources-${scripts::12}.tar.gz.part-"
+          rm "$RUNNER_TEMP/dependency-sources-${scripts::12}.tar.gz"
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
           {
             echo "NAME=${version}-jourfin.${{ inputs.revision }}"
@@ -69,7 +73,7 @@ jobs:
 
           - Linux and Windows, x64 and ARM64: static GPL builds from the scripts of this repository (a fork of BtbN/FFmpeg-Builds), dependencies from the upstream images named in each \`*.provenance.txt\`.
           - macOS, Apple silicon and Intel: built with ffmpeg's own decoders and VideoToolbox, no external libraries (LGPL).
-          - Corresponding source: \`ffmpeg-$VERSION-source.tar.gz\`, the build scripts and the downloaded dependency sources.
+          - Corresponding source: \`ffmpeg-$VERSION-source.tar.gz\`, the build scripts, and the dependency sources in parts (join them with \`cat dependency-sources-*.tar.gz.part-* > dependency-sources.tar.gz\`).
           - Verify downloads with \`SHA256SUMS\`.
           NOTES
           gh release create "$NAME" dist/* --title "ffmpeg $VERSION for Jourfin" --notes-file notes.md --target "$(git rev-parse HEAD)"
