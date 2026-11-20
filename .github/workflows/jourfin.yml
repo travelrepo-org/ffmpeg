@@ -10,15 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: ffmpeg tag to build, for example n9.0.2
+        description: ffmpeg branch or tag to build. The head of a release branch matches upstream's dependency images; the exact commit is recorded.
         required: true
-        default: n9.0.2
+        default: release/9.0
       series:
         description: Upstream image series that matches the tag (addin), for example 9.0
         required: true
         default: '9.0'
       revision:
-        description: Our release revision for this tag; the release is named <tag>-jourfin.<revision>
+        description: Our release revision; the release is named after the built version, such as n9.0.2-15-gabc1234-jourfin.<revision>
         required: true
         default: '1'
 permissions:
@@ -41,13 +41,16 @@ jobs:
           GITHUB_REPOSITORY=ffmpeg-builds/ffmpeg-builds GIT_BRANCH_OVERRIDE='${{ inputs.tag }}' ./build.sh '${{ matrix.target }}' gpl '${{ inputs.series }}'
           image="ghcr.io/ffmpeg-builds/ffmpeg-builds/${{ matrix.target }}-gpl-${{ inputs.series }}:latest"
           mkdir -p out
-          for f in artifacts/*; do mv "$f" "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}-gpl.${f##*.}"; done
+          version="$(./ffbuild/ffmpeg/ffbuild/version.sh ffbuild/ffmpeg 2>/dev/null || true)"
+          [ -n "$version" ] || version="$(basename artifacts/* | sed -E 's/^ffmpeg-(.*)-${{ matrix.target }}-gpl.*/\1/')"
+          echo "$version" > out/VERSION-${{ matrix.target }}
+          for f in artifacts/*; do mv "$f" "out/ffmpeg-${{ matrix.target }}-gpl.${f##*.}"; done
           {
             echo "target: ${{ matrix.target }}"
-            echo "ffmpeg: ${{ inputs.tag }} ($(git ls-remote https://github.com/FFmpeg/FFmpeg.git 'refs/tags/${{ inputs.tag }}^{}' | cut -f1))"
+            echo "ffmpeg: ${{ inputs.tag }} at $(git ls-remote https://github.com/FFmpeg/FFmpeg.git 'refs/heads/${{ inputs.tag }}' 'refs/tags/${{ inputs.tag }}^{}' | head -1 | cut -f1) ($version)"
             echo "scripts: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}"
             echo "dependency image: $(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
-          } > "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}.provenance.txt"
+          } > "out/ffmpeg-${{ matrix.target }}.provenance.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.target }}
@@ -64,6 +67,8 @@ jobs:
             target: macos64
     runs-on: macos-latest
     steps:
+      - name: Tools
+        run: brew install nasm
       - name: Build ffmpeg
         run: |
           set -euo pipefail
@@ -77,22 +82,24 @@ jobs:
           ./configure --prefix="$prefix" $cross --cc="clang -arch ${{ matrix.arch }}" \
             --extra-cflags="-mmacosx-version-min=12.0" --extra-ldflags="-mmacosx-version-min=12.0" \
             --disable-doc --disable-debug --disable-ffplay --disable-autodetect \
-            --enable-videotoolbox --enable-audiotoolbox --enable-zlib --enable-bzlib --enable-iconv \
+            --enable-videotoolbox --enable-audiotoolbox --enable-zlib --enable-bzlib \
             --extra-version=jourfin
           make -j"$(sysctl -n hw.ncpu)"
           make install
           cd ..
-          name="ffmpeg-${{ inputs.tag }}-${{ matrix.target }}-lgpl"
+          version="$(ffmpeg/ffbuild/version.sh ffmpeg)"
+          name="ffmpeg-${{ matrix.target }}-lgpl"
           mkdir -p "pkg/$name/bin" out
           cp prefix/bin/ffmpeg prefix/bin/ffprobe "pkg/$name/bin/"
           cp ffmpeg/COPYING.LGPLv2.1 "pkg/$name/LICENSE.txt"
           (cd pkg && tar -cJf "../out/$name.tar.xz" "$name")
           {
             echo "target: ${{ matrix.target }}"
-            echo "ffmpeg: ${{ inputs.tag }} ($(git -C ffmpeg rev-parse HEAD))"
+            echo "ffmpeg: ${{ inputs.tag }} at $(git -C ffmpeg rev-parse HEAD) ($version)"
             echo "configure: $(prefix/bin/ffmpeg -hide_banner -buildconf | tr '\n' ' ')"
             echo "runner: $(sw_vers -productName) $(sw_vers -productVersion), $(clang --version | head -1)"
-          } > "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}.provenance.txt"
+          } > "out/ffmpeg-${{ matrix.target }}.provenance.txt"
+          echo "$version" > out/VERSION-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.target }}
@@ -103,7 +110,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      NAME: ${{ inputs.tag }}-jourfin.${{ inputs.revision }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -114,10 +120,16 @@ jobs:
       - name: Source and licences
         run: |
           set -euo pipefail
+          # Every build must come from the same ffmpeg commit.
+          versions="$(cat dist/VERSION-* | sort -u)"
+          [ "$(echo "$versions" | wc -l)" = 1 ] || { echo "::error::The builds differ: $versions"; exit 1; }
+          echo "NAME=${versions}-jourfin.${{ inputs.revision }}" >> "$GITHUB_ENV"
+          echo "VERSION=${versions}" >> "$GITHUB_ENV"
+          rm dist/VERSION-*
           # The exact ffmpeg source, and the build scripts of this commit with the sources of every dependency they
           # download (GPL: the corresponding source goes with the programs).
           git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
-          git -C ffmpeg-src archive --prefix='ffmpeg-${{ inputs.tag }}/' -o "$PWD/dist/ffmpeg-${{ inputs.tag }}-source.tar.gz" HEAD
+          git -C ffmpeg-src archive --prefix="ffmpeg-$VERSION/" -o "$PWD/dist/ffmpeg-$VERSION-source.tar.gz" HEAD
           git archive --prefix=build-scripts/ -o "dist/build-scripts-${GITHUB_SHA::12}.tar.gz" HEAD
           ./download.sh || true
           if [ -d .cache/downloads ]; then tar -czf "dist/dependency-sources-${GITHUB_SHA::12}.tar.gz" -C .cache downloads; fi
@@ -127,11 +139,11 @@ jobs:
       - name: Publish
         run: |
           cat > notes.md <<NOTES
-          ffmpeg ${{ inputs.tag }} as bundled by Jourfin. Not an official FFmpeg release; FFmpeg is a trademark of Fabrice Bellard.
+          ffmpeg $VERSION (from ${{ inputs.tag }}) as bundled by Jourfin. Not an official FFmpeg release; FFmpeg is a trademark of Fabrice Bellard.
 
           - Linux and Windows, x64 and ARM64: static GPL builds from the scripts of this repository (a fork of BtbN/FFmpeg-Builds), dependencies from the upstream images named in each \`*.provenance.txt\`.
           - macOS, Apple silicon and Intel: built with ffmpeg's own decoders and VideoToolbox, no external libraries (LGPL).
-          - Corresponding source: \`ffmpeg-${{ inputs.tag }}-source.tar.gz\`, the build scripts and the downloaded dependency sources.
+          - Corresponding source: \`ffmpeg-$VERSION-source.tar.gz\`, the build scripts and the downloaded dependency sources.
           - Verify downloads with \`SHA256SUMS\`.
           NOTES
-          gh release create "$NAME" dist/* --title "ffmpeg ${{ inputs.tag }} for Jourfin (${{ inputs.revision }})" --notes-file notes.md --target "$GITHUB_SHA"
+          gh release create "$NAME" dist/* --title "ffmpeg $VERSION for Jourfin" --notes-file notes.md --target "$GITHUB_SHA"
