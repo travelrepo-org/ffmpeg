@@ -1,0 +1,135 @@
+name: Jourfin ffmpeg release
+# Builds the ffmpeg that Jourfin bundles (https://github.com/travelrepo-org/jourfin, docs/OUTPUTS.md §4) and publishes
+# it as a release of this repository with its source, licences and checksums. Started by hand only.
+#
+# Linux and Windows (x64, ARM64): static GPL builds made by the scripts of this fork of BtbN/FFmpeg-Builds, in the
+# public dependency images of upstream (ghcr.io/ffmpeg-builds/ffmpeg-builds/<target>-gpl-<series>), at an exact
+# ffmpeg tag. macOS (ARM64, x64): built here on a macOS runner with ffmpeg's own decoders and VideoToolbox only, no
+# external libraries, so those builds are LGPL.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: ffmpeg tag to build, for example n9.0.2
+        required: true
+        default: n9.0.2
+      series:
+        description: Upstream image series that matches the tag (addin), for example 9.0
+        required: true
+        default: '9.0'
+      revision:
+        description: Our release revision for this tag; the release is named <tag>-jourfin.<revision>
+        required: true
+        default: '1'
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux64, linuxarm64, win64, winarm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: ./util/free_disk_space.sh
+      - name: Build ffmpeg
+        run: |
+          set -euo pipefail
+          # The upstream image holds every dependency, built by these scripts; only ffmpeg itself is built here.
+          GITHUB_REPOSITORY=ffmpeg-builds/ffmpeg-builds GIT_BRANCH_OVERRIDE='${{ inputs.tag }}' ./build.sh '${{ matrix.target }}' gpl '${{ inputs.series }}'
+          image="ghcr.io/ffmpeg-builds/ffmpeg-builds/${{ matrix.target }}-gpl-${{ inputs.series }}:latest"
+          mkdir -p out
+          for f in artifacts/*; do mv "$f" "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}-gpl.${f##*.}"; done
+          {
+            echo "target: ${{ matrix.target }}"
+            echo "ffmpeg: ${{ inputs.tag }} ($(git ls-remote https://github.com/FFmpeg/FFmpeg.git 'refs/tags/${{ inputs.tag }}^{}' | cut -f1))"
+            echo "scripts: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}"
+            echo "dependency image: $(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+          } > "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}.provenance.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: macosarm64
+          - arch: x86_64
+            target: macos64
+    runs-on: macos-latest
+    steps:
+      - name: Build ffmpeg
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          cd ffmpeg
+          prefix="$PWD/../prefix"
+          cross=()
+          if [ '${{ matrix.arch }}' != "$(uname -m)" ]; then cross=(--enable-cross-compile --arch='${{ matrix.arch }}' --target-os=darwin); fi
+          ./configure --prefix="$prefix" "${cross[@]}" --cc="clang -arch ${{ matrix.arch }}" \
+            --extra-cflags="-mmacosx-version-min=12.0" --extra-ldflags="-mmacosx-version-min=12.0" \
+            --disable-doc --disable-debug --disable-ffplay --disable-autodetect \
+            --enable-videotoolbox --enable-audiotoolbox --enable-securetransport --enable-zlib --enable-bzlib --enable-iconv \
+            --extra-version=jourfin
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          cd ..
+          name="ffmpeg-${{ inputs.tag }}-${{ matrix.target }}-lgpl"
+          mkdir -p "pkg/$name/bin" out
+          cp prefix/bin/ffmpeg prefix/bin/ffprobe "pkg/$name/bin/"
+          cp ffmpeg/COPYING.LGPLv2.1 "pkg/$name/LICENSE.txt"
+          (cd pkg && tar -cJf "../out/$name.tar.xz" "$name")
+          {
+            echo "target: ${{ matrix.target }}"
+            echo "ffmpeg: ${{ inputs.tag }} ($(git -C ffmpeg rev-parse HEAD))"
+            echo "configure: $(prefix/bin/ffmpeg -hide_banner -buildconf | tr '\n' ' ')"
+            echo "runner: $(sw_vers -productName) $(sw_vers -productVersion), $(clang --version | head -1)"
+          } > "out/ffmpeg-${{ inputs.tag }}-${{ matrix.target }}.provenance.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+  release:
+    needs: [build, macos]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NAME: ${{ inputs.tag }}-jourfin.${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: dist
+      - name: Source and licences
+        run: |
+          set -euo pipefail
+          # The exact ffmpeg source, and the build scripts of this commit with the sources of every dependency they
+          # download (GPL: the corresponding source goes with the programs).
+          git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+          git -C ffmpeg-src archive --prefix='ffmpeg-${{ inputs.tag }}/' -o "$PWD/dist/ffmpeg-${{ inputs.tag }}-source.tar.gz" HEAD
+          git archive --prefix=build-scripts/ -o "dist/build-scripts-${GITHUB_SHA::12}.tar.gz" HEAD
+          ./download.sh || true
+          if [ -d .cache/downloads ]; then tar -czf "dist/dependency-sources-${GITHUB_SHA::12}.tar.gz" -C .cache downloads; fi
+          cp ffmpeg-src/COPYING.GPLv3 dist/COPYING.GPLv3.txt
+          cp ffmpeg-src/COPYING.LGPLv2.1 dist/COPYING.LGPLv2.1.txt
+          cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        run: |
+          cat > notes.md <<NOTES
+          ffmpeg ${{ inputs.tag }} as bundled by Jourfin. Not an official FFmpeg release; FFmpeg is a trademark of Fabrice Bellard.
+
+          - Linux and Windows, x64 and ARM64: static GPL builds from the scripts of this repository (a fork of BtbN/FFmpeg-Builds), dependencies from the upstream images named in each \`*.provenance.txt\`.
+          - macOS, Apple silicon and Intel: built with ffmpeg's own decoders and VideoToolbox, no external libraries (LGPL).
+          - Corresponding source: \`ffmpeg-${{ inputs.tag }}-source.tar.gz\`, the build scripts and the downloaded dependency sources.
+          - Verify downloads with \`SHA256SUMS\`.
+          NOTES
+          gh release create "$NAME" dist/* --title "ffmpeg ${{ inputs.tag }} for Jourfin (${{ inputs.revision }})" --notes-file notes.md --target "$GITHUB_SHA"
