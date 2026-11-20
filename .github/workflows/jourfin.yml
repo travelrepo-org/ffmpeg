@@ -72,7 +72,8 @@ jobs:
       - name: Build ffmpeg
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          # The whole history (without file contents), as upstream's build does, so the version names agree.
+          git clone --filter=blob:none --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg
           cd ffmpeg
           prefix="$PWD/../prefix"
           # macOS still ships bash 3.2, where an empty array under `set -u` is an error: pass the cross options as a string.
