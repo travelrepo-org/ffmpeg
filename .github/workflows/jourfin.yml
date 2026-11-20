@@ -70,12 +70,14 @@ jobs:
           git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg
           cd ffmpeg
           prefix="$PWD/../prefix"
-          cross=()
-          if [ '${{ matrix.arch }}' != "$(uname -m)" ]; then cross=(--enable-cross-compile --arch='${{ matrix.arch }}' --target-os=darwin); fi
-          ./configure --prefix="$prefix" "${cross[@]}" --cc="clang -arch ${{ matrix.arch }}" \
+          # macOS still ships bash 3.2, where an empty array under `set -u` is an error: pass the cross options as a string.
+          cross=""
+          if [ '${{ matrix.arch }}' != "$(uname -m)" ]; then cross="--enable-cross-compile --arch=${{ matrix.arch }} --target-os=darwin"; fi
+          # shellcheck disable=SC2086
+          ./configure --prefix="$prefix" $cross --cc="clang -arch ${{ matrix.arch }}" \
             --extra-cflags="-mmacosx-version-min=12.0" --extra-ldflags="-mmacosx-version-min=12.0" \
             --disable-doc --disable-debug --disable-ffplay --disable-autodetect \
-            --enable-videotoolbox --enable-audiotoolbox --enable-securetransport --enable-zlib --enable-bzlib --enable-iconv \
+            --enable-videotoolbox --enable-audiotoolbox --enable-zlib --enable-bzlib --enable-iconv \
             --extra-version=jourfin
           make -j"$(sysctl -n hw.ncpu)"
           make install
