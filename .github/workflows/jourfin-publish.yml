@@ -1,0 +1,72 @@
+name: Jourfin ffmpeg publish
+# Publishes the builds of a "Jourfin ffmpeg release" run as a release of this repository, with the exact ffmpeg
+# source they were built from, the build scripts, the dependency sources, the licences and SHA256SUMS. Called at the
+# end of that workflow, or by hand with the id of a run whose builds succeeded.
+on:
+  workflow_call:
+    inputs:
+      run_id: {type: string, required: true}
+      tag: {type: string, required: true}
+      revision: {type: string, required: true}
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Id of the "Jourfin ffmpeg release" run whose builds to publish
+        required: true
+      tag:
+        description: The branch or tag that run built, for example release/9.0
+        required: true
+      revision:
+        description: Our release revision
+        required: true
+        default: '1'
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Source, licences and checksums
+        run: |
+          set -euo pipefail
+          # Every build must come from the same ffmpeg commit; that commit's source goes with them.
+          version="$(cat dist/VERSION-* | sort -u)"
+          [ "$(printf '%s\n' "$version" | wc -l)" = 1 ] || { echo "::error::The builds differ: $version"; exit 1; }
+          commit="$(grep -h '^ffmpeg:' dist/*.provenance.txt | sed -E 's/.* at ([0-9a-f]{40}).*/\1/' | sort -u)"
+          [ "$(printf '%s\n' "$commit" | wc -l)" = 1 ] || { echo "::error::The builds name different commits: $commit"; exit 1; }
+          rm dist/VERSION-*
+          git clone --filter=blob:none --no-checkout https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+          git -C ffmpeg-src archive --prefix="ffmpeg-$version/" -o "$PWD/dist/ffmpeg-$version-source.tar.gz" "$commit"
+          git -C ffmpeg-src show "$commit:COPYING.GPLv3" > dist/COPYING.GPLv3.txt
+          git -C ffmpeg-src show "$commit:COPYING.LGPLv2.1" > dist/COPYING.LGPLv2.1.txt
+          scripts="$(git rev-parse HEAD)"
+          git archive --prefix=build-scripts/ -o "dist/build-scripts-${scripts::12}.tar.gz" HEAD
+          ./download.sh || true
+          if [ -d .cache/downloads ]; then tar -czf "dist/dependency-sources-${scripts::12}.tar.gz" -C .cache downloads; fi
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          {
+            echo "NAME=${version}-jourfin.${{ inputs.revision }}"
+            echo "VERSION=${version}"
+            echo "COMMIT=${commit}"
+          } >> "$GITHUB_ENV"
+      - name: Publish
+        run: |
+          cat > notes.md <<NOTES
+          ffmpeg $VERSION (${{ inputs.tag }} at $COMMIT) as bundled by Jourfin. Not an official FFmpeg release; FFmpeg is a trademark of Fabrice Bellard.
+
+          - Linux and Windows, x64 and ARM64: static GPL builds from the scripts of this repository (a fork of BtbN/FFmpeg-Builds), dependencies from the upstream images named in each \`*.provenance.txt\`.
+          - macOS, Apple silicon and Intel: built with ffmpeg's own decoders and VideoToolbox, no external libraries (LGPL).
+          - Corresponding source: \`ffmpeg-$VERSION-source.tar.gz\`, the build scripts and the downloaded dependency sources.
+          - Verify downloads with \`SHA256SUMS\`.
+          NOTES
+          gh release create "$NAME" dist/* --title "ffmpeg $VERSION for Jourfin" --notes-file notes.md --target "$(git rev-parse HEAD)"

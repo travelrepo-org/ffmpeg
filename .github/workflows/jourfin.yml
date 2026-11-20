@@ -108,43 +108,10 @@ jobs:
           if-no-files-found: error
   release:
     needs: [build, macos]
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: build-*
-          merge-multiple: true
-          path: dist
-      - name: Source and licences
-        run: |
-          set -euo pipefail
-          # Every build must come from the same ffmpeg commit.
-          versions="$(cat dist/VERSION-* | sort -u)"
-          [ "$(echo "$versions" | wc -l)" = 1 ] || { echo "::error::The builds differ: $versions"; exit 1; }
-          echo "NAME=${versions}-jourfin.${{ inputs.revision }}" >> "$GITHUB_ENV"
-          echo "VERSION=${versions}" >> "$GITHUB_ENV"
-          rm dist/VERSION-*
-          # The exact ffmpeg source, and the build scripts of this commit with the sources of every dependency they
-          # download (GPL: the corresponding source goes with the programs).
-          git clone --depth 1 --branch '${{ inputs.tag }}' https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
-          git -C ffmpeg-src archive --prefix="ffmpeg-$VERSION/" -o "$PWD/dist/ffmpeg-$VERSION-source.tar.gz" HEAD
-          git archive --prefix=build-scripts/ -o "dist/build-scripts-${GITHUB_SHA::12}.tar.gz" HEAD
-          ./download.sh || true
-          if [ -d .cache/downloads ]; then tar -czf "dist/dependency-sources-${GITHUB_SHA::12}.tar.gz" -C .cache downloads; fi
-          cp ffmpeg-src/COPYING.GPLv3 dist/COPYING.GPLv3.txt
-          cp ffmpeg-src/COPYING.LGPLv2.1 dist/COPYING.LGPLv2.1.txt
-          cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - name: Publish
-        run: |
-          cat > notes.md <<NOTES
-          ffmpeg $VERSION (from ${{ inputs.tag }}) as bundled by Jourfin. Not an official FFmpeg release; FFmpeg is a trademark of Fabrice Bellard.
-
-          - Linux and Windows, x64 and ARM64: static GPL builds from the scripts of this repository (a fork of BtbN/FFmpeg-Builds), dependencies from the upstream images named in each \`*.provenance.txt\`.
-          - macOS, Apple silicon and Intel: built with ffmpeg's own decoders and VideoToolbox, no external libraries (LGPL).
-          - Corresponding source: \`ffmpeg-$VERSION-source.tar.gz\`, the build scripts and the downloaded dependency sources.
-          - Verify downloads with \`SHA256SUMS\`.
-          NOTES
-          gh release create "$NAME" dist/* --title "ffmpeg $VERSION for Jourfin" --notes-file notes.md --target "$GITHUB_SHA"
+    uses: ./.github/workflows/jourfin-publish.yml
+    with:
+      run_id: ${{ github.run_id }}
+      tag: ${{ inputs.tag }}
+      revision: ${{ inputs.revision }}
+    permissions:
+      contents: write
